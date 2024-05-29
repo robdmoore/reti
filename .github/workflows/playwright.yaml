@@ -1,12 +1,13 @@
-name: Playwright Tests
+name: Contract/Playwright Tests
 on:
   push:
-    branches: 
+    branches:
       - 'main'
+      - 'feat/citest'
   pull_request:
-    branches: 
+    branches:
       - 'main'
-      # - 'dev'
+#      - 'dev'
 
 jobs:
   playwright-tests:
@@ -68,6 +69,9 @@ jobs:
 
       - name: Bootstrap the validator
         run: pnpm run bootstrap
+
+      - name: Run Contract tests
+        run: pnpm --filter ./contracts run test
 
       - name: Run Playwright tests
         run: pnpm --filter ./ui exec playwright test
