@@ -10,7 +10,7 @@ on:
 #      - 'dev'
 
 jobs:
-  playwright-tests:
+  ci-tests:
     timeout-minutes: 60
     runs-on: ubuntu-latest
 
@@ -67,11 +67,11 @@ jobs:
       - name: Start local Algorand network
         run: algokit localnet start
 
+      - name: Run Contract tests from already built contracts
+        run: pnpm --filter ./contracts run retest
+
       - name: Bootstrap the validator
         run: pnpm run bootstrap
-
-      - name: Run Contract tests
-        run: pnpm --filter ./contracts run test
 
       - name: Run Playwright tests
         run: pnpm --filter ./ui exec playwright test
