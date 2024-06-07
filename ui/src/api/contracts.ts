@@ -12,8 +12,10 @@ import {
 } from '@/api/clients'
 import { fetchNfd } from '@/api/nfd'
 import { ALGORAND_ZERO_ADDRESS_STRING } from '@/constants/accounts'
+import { GatingType } from '@/constants/gating'
 import { StakingPoolClient } from '@/contracts/StakingPoolClient'
 import { ValidatorRegistryClient } from '@/contracts/ValidatorRegistryClient'
+import { Asset } from '@/interfaces/algod'
 import { StakedInfo, StakerPoolData, StakerValidatorData } from '@/interfaces/staking'
 import {
   Constraints,
@@ -33,6 +35,7 @@ import {
   ValidatorPoolKey,
 } from '@/interfaces/validator'
 import { makeEmptyTransactionSigner } from '@/lib/makeEmptyTransactionSigner'
+import { BalanceChecker } from '@/utils/balanceChecker'
 import { chunkBytes } from '@/utils/bytes'
 import {
   transformNodePoolAssignment,
@@ -120,6 +123,19 @@ export async function fetchValidator(
     if (validator.config.rewardTokenId > 0) {
       const rewardToken = await fetchAsset(validator.config.rewardTokenId)
       validator.rewardToken = rewardToken
+    }
+
+    if (validator.config.entryGatingType === GatingType.AssetId) {
+      const gatingAssets = await Promise.all(
+        validator.config.entryGatingAssets.map(async (assetId) => {
+          if (assetId > 0) {
+            return fetchAsset(assetId)
+          }
+          return null
+        }),
+      )
+
+      validator.gatingAssets = gatingAssets.filter(Boolean) as Asset[]
     }
 
     if (validator.config.nfdForInfo > 0) {
@@ -232,6 +248,10 @@ export async function addValidator(
     amount: Number(validatorMbr),
     suggestedParams,
   })
+
+  // Check balance
+  const requiredBalance = Number(payValidatorMbr.amount) + payValidatorMbr.fee + 1000
+  await BalanceChecker.check(activeAddress, requiredBalance, 'Add validator')
 
   const entryGatingType = Number(values.entryGatingType || 0)
   const entryGatingAddress = values.entryGatingAddress || ALGORAND_ZERO_ADDRESS_STRING
@@ -385,6 +405,11 @@ export async function addStakingPool(
     suggestedParams,
   })
 
+  // Check balance
+  const requiredBalance =
+    Number(payValidatorAddPoolMbr.amount) + payValidatorAddPoolMbr.fee + 1000 + 1000 + 2000
+  await BalanceChecker.check(activeAddress, requiredBalance, 'Add staking pool')
+
   const addPoolResponse = await validatorClient
     .compose()
     .gas({}, { note: '1' })
@@ -434,6 +459,11 @@ export async function initStakingPoolStorage(
     amount: mbrAmount,
     suggestedParams,
   })
+
+  // Check balance
+  const requiredBalance =
+    Number(payPoolInitStorageMbr.amount) + payPoolInitStorageMbr.fee + 1000 + 1000 + 3000
+  await BalanceChecker.check(activeAddress, requiredBalance, 'Pool storage requirement payment')
 
   const stakingPoolClient = await getStakingPoolClient(poolAppId, signer, activeAddress)
 
@@ -544,7 +574,8 @@ export async function addStake(
 
   const simulateComposer = simulateValidatorClient
     .compose()
-    .gas({})
+    .gas({}, { note: '1', sendParams: { fee: AlgoAmount.MicroAlgos(0) } })
+    .gas({}, { note: '2', sendParams: { fee: AlgoAmount.MicroAlgos(0) } })
     .addStake(
       {
         stakedAmountPayment: {
@@ -578,12 +609,16 @@ export async function addStake(
 
   // @todo: switch to Joe's new method(s)
   const feeAmount = AlgoAmount.MicroAlgos(
-    2000 + 1000 * ((simulateResults.simulateResponse.txnGroups[0].appBudgetAdded as number) / 700),
+    3000 + 1000 * ((simulateResults.simulateResponse.txnGroups[0].appBudgetAdded as number) / 700),
   )
+
+  let requiredBalance =
+    Number(stakeTransferPayment.amount) + stakeTransferPayment.fee + feeAmount.microAlgos
 
   const composer = validatorClient
     .compose()
-    .gas({})
+    .gas({}, { note: '1', sendParams: { fee: AlgoAmount.MicroAlgos(0) } })
+    .gas({}, { note: '2', sendParams: { fee: AlgoAmount.MicroAlgos(0) } })
     .addStake(
       {
         stakedAmountPayment: {
@@ -605,12 +640,17 @@ export async function addStake(
       suggestedParams,
     })
 
+    requiredBalance += rewardTokenOptInTxn.fee
+
     composer.addTransaction(rewardTokenOptInTxn)
   }
 
+  // Check balance
+  await BalanceChecker.check(activeAddress, requiredBalance, 'Add stake')
+
   const result = await composer.execute({ populateAppCallResources: true })
 
-  const [valId, poolId, poolAppId] = result.returns![1]
+  const [valId, poolId, poolAppId] = result.returns![2]
 
   return {
     poolId: Number(poolId),
@@ -884,6 +924,8 @@ export async function removeStake(
       ),
   )
 
+  let requiredBalance = feeAmount.microAlgos
+
   const stakingPoolClient = await getStakingPoolClient(poolAppId, signer, activeAddress)
 
   const composer = stakingPoolClient
@@ -907,8 +949,13 @@ export async function removeStake(
       suggestedParams,
     })
 
+    requiredBalance += rewardTokenOptInTxn.fee
+
     composer.addTransaction(rewardTokenOptInTxn)
   }
+
+  // Check balance
+  await BalanceChecker.check(activeAddress, requiredBalance, 'Remove stake')
 
   await composer.execute({ populateAppCallResources: true })
 }
@@ -937,6 +984,10 @@ export async function epochBalanceUpdate(
     const feeAmount = AlgoAmount.MicroAlgos(
       3000 + 1000 * ((simulateResult.simulateResponse.txnGroups[0].appBudgetAdded as number) / 700),
     )
+
+    // Check balance
+    const requiredBalance = feeAmount.microAlgos
+    await BalanceChecker.check(activeAddress, requiredBalance, 'Epoch balance update')
 
     const stakingPoolClient = await getStakingPoolClient(poolAppId, signer, activeAddress)
 
@@ -1111,6 +1162,9 @@ export async function changeValidatorManager(
 ) {
   const validatorClient = await getValidatorClient(signer, activeAddress)
 
+  // Check balance
+  await BalanceChecker.check(activeAddress, 1000, 'Change validator manager')
+
   return validatorClient
     .compose()
     .changeValidatorManager({ validatorId, manager })
@@ -1126,6 +1180,9 @@ export async function changeValidatorSunsetInfo(
 ) {
   const validatorClient = await getValidatorClient(signer, activeAddress)
 
+  // Check balance
+  await BalanceChecker.check(activeAddress, 1000, 'Change validator sunset info')
+
   return validatorClient
     .compose()
     .changeValidatorSunsetInfo({ validatorId, sunsettingOn, sunsettingTo })
@@ -1140,6 +1197,9 @@ export async function changeValidatorNfd(
   activeAddress: string,
 ) {
   const validatorClient = await getValidatorClient(signer, activeAddress)
+
+  // Check balance
+  await BalanceChecker.check(activeAddress, 1000, 'Change validator NFD')
 
   return validatorClient
     .compose()
@@ -1158,6 +1218,9 @@ export async function changeValidatorCommissionAddress(
 ) {
   const validatorClient = await getValidatorClient(signer, activeAddress)
 
+  // Check balance
+  await BalanceChecker.check(activeAddress, 1000, 'Change validator commission address')
+
   return validatorClient
     .compose()
     .changeValidatorCommissionAddress({ validatorId, commissionAddress })
@@ -1175,6 +1238,9 @@ export async function changeValidatorRewardInfo(
   activeAddress: string,
 ) {
   const validatorClient = await getValidatorClient(signer, activeAddress)
+
+  // Check balance
+  await BalanceChecker.check(activeAddress, 1000, 'Change validator reward info')
 
   return validatorClient
     .compose()
@@ -1244,6 +1310,15 @@ export async function linkPoolToNfd(
         ],
       }),
     })
+
+    // Check balance
+    const requiredBalance =
+      Number(payBoxStorageMbrTxn.amount) +
+      payBoxStorageMbrTxn.fee +
+      updateNfdAppCall.fee +
+      feeAmount.microAlgos
+
+    await BalanceChecker.check(activeAddress, requiredBalance, 'Link pool to NFD')
 
     const stakingPoolClient = await getStakingPoolClient(poolAppId, signer, activeAddress)
 

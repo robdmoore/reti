@@ -38,6 +38,7 @@ import {
 import { StakerPoolData, StakerValidatorData } from '@/interfaces/staking'
 import { Validator } from '@/interfaces/validator'
 import { useAuthAddress } from '@/providers/AuthAddressProvider'
+import { InsufficientBalanceError } from '@/utils/balanceChecker'
 import { setValidatorQueriesData } from '@/utils/contracts'
 import { formatAlgoAmount } from '@/utils/format'
 
@@ -83,6 +84,15 @@ export function UnstakeModal({ validator, setValidator, stakesByValidator }: Uns
       .refine((val) => !isNaN(Number(val)) && parseFloat(val) > 0, {
         message: 'Invalid amount',
       })
+      .refine(
+        (val) => {
+          const match = val.match(/^\d+(\.\d{1,6})?$/)
+          return match !== null
+        },
+        {
+          message: 'Cannot have more than 6 decimal places',
+        },
+      )
       .superRefine((val, ctx) => {
         const algoAmount = parseFloat(val)
         const amountToUnstake = AlgoAmount.Algos(algoAmount).microAlgos
@@ -219,7 +229,15 @@ export function UnstakeModal({ validator, setValidator, stakesByValidator }: Uns
       queryClient.invalidateQueries({ queryKey: ['pools-info'] })
       router.invalidate()
     } catch (error) {
-      toast.error('Failed to remove stake from pool', { id: toastId })
+      if (error instanceof InsufficientBalanceError) {
+        toast.error('Insufficient balance', {
+          id: toastId,
+          description: error.toastMessage,
+          duration: 5000,
+        })
+      } else {
+        toast.error('Failed to remove stake from pool', { id: toastId })
+      }
       console.error(error)
     } finally {
       setIsSigning(false)

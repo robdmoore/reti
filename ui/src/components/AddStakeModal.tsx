@@ -44,6 +44,7 @@ import { GatingType } from '@/constants/gating'
 import { StakerPoolData, StakerValidatorData } from '@/interfaces/staking'
 import { Constraints, Validator } from '@/interfaces/validator'
 import { useAuthAddress } from '@/providers/AuthAddressProvider'
+import { InsufficientBalanceError } from '@/utils/balanceChecker'
 import {
   calculateMaxAvailableToStake,
   fetchValueToVerify,
@@ -150,6 +151,15 @@ export function AddStakeModal({
       .refine((val) => !isNaN(Number(val)) && parseFloat(val) > 0, {
         message: 'Invalid amount',
       })
+      .refine(
+        (val) => {
+          const match = val.match(/^\d+(\.\d{1,6})?$/)
+          return match !== null
+        },
+        {
+          message: 'Cannot have more than 6 decimal places',
+        },
+      )
       .superRefine((val, ctx) => {
         const algoAmount = parseFloat(val)
         const amountToStake = AlgoAmount.Algos(algoAmount).microAlgos
@@ -324,7 +334,15 @@ export function AddStakeModal({
       queryClient.invalidateQueries({ queryKey: ['pools-info'] })
       router.invalidate()
     } catch (error) {
-      toast.error('Failed to add stake to pool', { id: toastId })
+      if (error instanceof InsufficientBalanceError) {
+        toast.error('Insufficient balance', {
+          id: toastId,
+          description: error.toastMessage,
+          duration: 5000,
+        })
+      } else {
+        toast.error('Failed to add stake to pool', { id: toastId })
+      }
       console.error(error)
     } finally {
       setIsSigning(false)
